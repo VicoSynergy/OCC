@@ -1,0 +1,47 @@
+=== ENHANCED ML MODEL PERFORMANCE REPORT ===
+Generated: 2025-07-18 17:17:04
+
+MODEL ARCHITECTURE:
+  Type: Calibrated Stacking Ensemble
+  Base Models: RF, XGB, LGBM
+  Meta Learner: Multinomial Logistic Regression
+  Calibration: Platt Scaling (Sigmoid)
+
+PERFORMANCE METRICS:
+  accuracy: 0.4933 (49.3%)
+  top1_accuracy: 0.4933 (49.3%)
+  top3_accuracy: 0.7972 (79.7%)
+  top5_accuracy: 0.8959 (89.6%)
+  coverage: 0.7972 (79.7%)
+  avg_confidence: 0.4185 (41.8%)
+  diversity_score: 0.0006 (0.1%)
+
+MODEL COMPARISON:
+                   accuracy  top1_accuracy  top3_accuracy  top5_accuracy  coverage  avg_confidence  diversity_score
+Stacking Ensemble    0.2390         0.2390         0.6281         0.7479    0.6281          0.3320           0.0006
+RF                   0.2759         0.2759         0.7441         0.8505    0.7441          0.3862           0.0006
+XGB                  0.3520         0.3520         0.7929         0.8940    0.7929          0.5868           0.0006
+LGBM                 0.2991         0.2991         0.7685         0.8809    0.7685          0.6022           0.0006
+
+TOP 15 FEATURES:
+   1. Client_Tenure_Years: 0.1481
+   2. Days_Since_Last_FNA: 0.1425
+   3. ClientAge: 0.1347
+   4. Engagement_Score: 0.0862
+   5. Nationality_encoded: 0.0754
+   6. Estimated_Net_Worth: 0.0636
+   7. Total_Liquid_Assets: 0.0611
+   8. Education: 0.0437
+   9. Income_Numeric: 0.0423
+  10. MaritalStatus: 0.0311
+  11. Digital_Adoption_Score: 0.0296
+  12. Years_With_Insurance: 0.0283
+  13. IncomeRange: 0.0282
+  14. ClientGender: 0.0245
+  15. Family_Protection_Priority: 0.0186
+
+TRAINING DETAILS:
+  Training samples: 32,942
+  Test samples: 8,236
+  Number of features: 18
+  Number of classes: 15

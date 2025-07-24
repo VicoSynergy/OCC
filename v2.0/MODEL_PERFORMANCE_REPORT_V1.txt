@@ -1,0 +1,43 @@
+=== PHASE 3: ML MODEL PERFORMANCE REPORT ===
+Generated: 2025-07-18 10:28:59
+
+MODEL SPECIFICATIONS:
+Model Type: Random Forest (Full)
+Training Dataset: full
+Training Samples: 33256
+Test Samples: 8315
+Top-1 Accuracy: 0.4230 (42.3%)
+Top-3 Accuracy: 0.7195 (72.0%)
+Calibrated Top-3 Accuracy: 0.7916 (79.2%)
+Number of Features: 20
+Number of Classes: 15
+Training Date: 2025-07-18 10:28:59
+
+TOP 10 FEATURE IMPORTANCE:
+ 1. ClientAge: 0.2158
+ 2. Nationality: 0.1060
+ 3. RiskProfile: 0.0999
+ 4. Estimated_Net_Worth: 0.0766
+ 5. Total_Liquid_Assets: 0.0719
+ 6. Education: 0.0497
+ 7. MaritalStatus: 0.0481
+ 8. Total_CPF: 0.0462
+ 9. Income_Numeric: 0.0343
+10. Life_Stage: 0.0342
+
+TARGET CLASSES:
+ 1. Accident_and_Health_Plans
+ 2. Add_Rider_to_existing_shield_plans
+ 3. Critical_Illness_Plans
+ 4. Discretionary_Managed_Account
+ 5. ENDOW_NP
+ 6. Endowment
+ 7. Investment_Linked_Plan___Accumulation
+ 8. Long_Term_Care_Plans
+ 9. Policy_Servicing_Non_Shield_Plans
+10. Retirement
+11. SHIELD
+12. Term
+13. Universal_Life_Protection
+14. Whole_Life
+15. Whole_Life_Income
