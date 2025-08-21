@@ -1,475 +1,404 @@
-"""
-FastAPI Product Subcategory Recommendation Service
-Processes raw client data and returns top-3 product subcategory recommendations
-"""
-
-from fastapi import FastAPI, HTTPException
-from pydantic import BaseModel, Field
+# main.py
+from __future__ import annotations
 from typing import List, Optional, Dict, Any
-import pandas as pd
+from datetime import datetime, timezone
+import math
+
 import numpy as np
+import pandas as pd
+from fastapi import FastAPI, HTTPException, Query
+from pydantic import BaseModel, Field, conlist
 import joblib
-import logging
-from datetime import datetime
-import uvicorn
 
-# Set up logging
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
+# ---------- Load artifacts ----------
+MODEL_PATH = "insurance_top_k_recommendation_model.pkl"
+SCALER_PATH = "feature_scaler.pkl"
+LABELS_PATH = "label_names.pkl"
+SELECTED_FEATURES_PATH = "selected_features.pkl"  # <-- You should have saved this
 
-# Initialize FastAPI app
-app = FastAPI(
-    title="Product Subcategory Recommendation API",
-    description="ML-powered product subcategory recommendations for financial advisors",
-    version="1.0.0"
-)
-
-# Global model variable
-model_package = None
-
-# ===== DATA MODELS (REQUEST/RESPONSE SCHEMAS) =====
-
-class ClientData(BaseModel):
-    """Raw client data input schema - matches your preprocessing pipeline"""
-    
-    # Core Demographics
-    ClientId: str
-    ClientAge: Optional[int] = Field(None, ge=18, le=100, description="Client age in years")
-    ClientGender: Optional[str] = Field(None, description="Male/Female")
-    Nationality: Optional[str] = Field(None, description="Client nationality")
-    MaritalStatus: Optional[str] = Field(None, description="Single/Married/Divorced/Widowed")
-    
-    # Socioeconomic
-    IncomeRange: Optional[str] = Field(None, description="No Income/Below S$30,000/S$30,000 - S$49,999/S$50,000 - S$99,999/S$100,000 and above")
-    Education: Optional[str] = Field(None, description="Education level")
-    EmploymentStatus: Optional[str] = Field(None, description="Employment status")
-    RiskProfile: Optional[str] = Field(None, description="Conservative/Moderate/Aggressive/etc")
-    
-    # Financial Assets (raw values before aggregation)
-    SavingsAccounts: Optional[float] = Field(None, ge=0, description="Savings account balance")
-    FixedDepositsAccount: Optional[float] = Field(None, ge=0, description="Fixed deposit balance")
-    StocksPortofolio: Optional[float] = Field(None, ge=0, description="Stock portfolio value")
-    BondPortofolio: Optional[float] = Field(None, ge=0, description="Bond portfolio value")
-    UTFEquityAsset: Optional[float] = Field(None, ge=0, description="Unit trust equity assets")
-    ETFs: Optional[float] = Field(None, ge=0, description="ETF holdings")
-    InvestmentProperties: Optional[float] = Field(None, ge=0, description="Investment property value")
-    CPFOABalance: Optional[float] = Field(None, ge=0, description="CPF Ordinary Account")
-    CPFSABalance: Optional[float] = Field(None, ge=0, description="CPF Special Account")
-    CPFMABalance: Optional[float] = Field(None, ge=0, description="CPF Medisave Account")
-    
-    # Insurance Portfolio (raw values)
-    Total_Policies: Optional[int] = Field(None, ge=0, description="Number of insurance policies")
-    Total_Life_Coverage: Optional[float] = Field(None, ge=0, description="Total life insurance coverage")
-    Total_CI_Coverage: Optional[float] = Field(None, ge=0, description="Total critical illness coverage")
-    Total_Annual_Premium: Optional[float] = Field(None, ge=0, description="Total annual insurance premium")
-
-class ProductRecommendation(BaseModel):
-    """Individual product recommendation"""
-    Id: str = Field(description="Product subcategory ID")
-    Label: str = Field(description="Product subcategory name")
-    Confidence: float = Field(description="Confidence score (0-1)")
-
-class RecommendationResponse(BaseModel):
-    """API response schema"""
-    clientId: str
-    recProductSubCatId: List[str] = Field(description="List of recommended subcategory IDs")
-    recProductSubCatLabel: List[str] = Field(description="List of recommended subcategory labels")
-    recommendations: List[ProductRecommendation] = Field(description="Detailed recommendations with confidence")
-    processingTime: float = Field(description="Processing time in seconds")
-    timestamp: str = Field(description="Prediction timestamp")
-
-# ===== FEATURE ENGINEERING FUNCTIONS =====
-
-def create_derived_features(client_data: Dict[str, Any]) -> Dict[str, Any]:
-    """
-    Create derived features from raw client data
-    Matches your preprocessing pipeline exactly
-    """
-    
-    features = client_data.copy()
-    
-    # Income processing (numeric conversion)
-    income_mapping = {
-        'No Income': 0,
-        'Below S$30,000': 15000,
-        'S$30,000 - S$49,999': 40000,
-        'S$50,000 - S$99,999': 75000,
-        'S$100,000 and above': 150000
-    }
-    
-    income_range = features.get('IncomeRange')
-    features['Income_Numeric'] = income_mapping.get(income_range, 0)
-    
-    # Asset aggregations (handle missing values with 0)
-    liquid_assets = [
-        features.get('SavingsAccounts', 0) or 0,
-        features.get('FixedDepositsAccount', 0) or 0
-    ]
-    features['Total_Liquid_Assets'] = sum(liquid_assets)
-    
-    investment_assets = [
-        features.get('StocksPortofolio', 0) or 0,
-        features.get('BondPortofolio', 0) or 0,
-        features.get('UTFEquityAsset', 0) or 0,
-        features.get('ETFs', 0) or 0
-    ]
-    features['Total_Investments'] = sum(investment_assets)
-    
-    cpf_assets = [
-        features.get('CPFOABalance', 0) or 0,
-        features.get('CPFSABalance', 0) or 0,
-        features.get('CPFMABalance', 0) or 0
-    ]
-    features['Total_CPF'] = sum(cpf_assets)
-    
-    # Net worth calculation
-    wealth_components = [
-        features['Total_Liquid_Assets'],
-        features['Total_Investments'],
-        features['Total_CPF'],
-        features.get('InvestmentProperties', 0) or 0
-    ]
-    features['Estimated_Net_Worth'] = sum(wealth_components)
-    
-    # Investment ratio
-    total_financial = features['Total_Liquid_Assets'] + features['Total_Investments']
-    if total_financial > 0:
-        features['Investment_Ratio'] = features['Total_Investments'] / total_financial
-    else:
-        features['Investment_Ratio'] = 0
-    
-    # Insurance features
-    features['Has_Insurance'] = 1 if (features.get('Total_Policies', 0) or 0) > 0 else 0
-    
-    # Life coverage multiple
-    if features['Income_Numeric'] > 0:
-        features['Life_Coverage_Multiple'] = (features.get('Total_Life_Coverage', 0) or 0) / features['Income_Numeric']
-    else:
-        features['Life_Coverage_Multiple'] = 0
-    
-    # Premium to income ratio
-    if features['Income_Numeric'] > 0:
-        features['Premium_to_Income_Ratio'] = (features.get('Total_Annual_Premium', 0) or 0) / features['Income_Numeric']
-    else:
-        features['Premium_to_Income_Ratio'] = 0
-    
-    # Coverage indicators
-    features['Has_Life_Coverage'] = 1 if (features.get('Total_Life_Coverage', 0) or 0) > 0 else 0
-    features['Has_CI_Coverage'] = 1 if (features.get('Total_CI_Coverage', 0) or 0) > 0 else 0
-    
-    # Coverage gaps
-    if features['Has_Insurance'] == 1 and features['Has_CI_Coverage'] == 0:
-        features['CI_Coverage_Gap'] = 1
-    else:
-        features['CI_Coverage_Gap'] = 0
-    
-    # Insurance sophistication
-    policies = features.get('Total_Policies', 0) or 0
-    life_cov = features['Has_Life_Coverage']
-    ci_cov = features['Has_CI_Coverage']
-    
-    if policies == 0:
-        features['Insurance_Sophistication'] = 'No_Insurance'
-    else:
-        coverage_types = life_cov + ci_cov
-        if coverage_types >= 2:
-            features['Insurance_Sophistication'] = 'Moderate'
-        else:
-            features['Insurance_Sophistication'] = 'Basic'
-    
-    # Life stage (simplified logic)
-    age = features.get('ClientAge')
-    marital = features.get('MaritalStatus', '').lower()
-    
-    if age and age < 35:
-        features['Life_Stage'] = 'Young_Single' if 'single' in marital else 'Young_Family'
-    elif age and age < 55:
-        features['Life_Stage'] = 'Mid_Career_Single' if 'single' in marital else 'Mid_Career_Family'
-    else:
-        features['Life_Stage'] = 'Pre_Retirement'
-    
-    return features
-
-def prepare_model_input(client_data: Dict[str, Any], model_package: Dict) -> pd.DataFrame:
-    """
-    Prepare model input features with proper encoding
-    """
-    
-    # Create derived features
-    features = create_derived_features(client_data)
-    
-    # Get required features
-    top_features = model_package['top_features']
-    feature_encoders = model_package['feature_encoders']
-    feature_info = model_package['feature_info']
-    
-    # Create feature matrix
-    X = pd.DataFrame(index=[0])
-    
-    for feature in top_features:
-        if feature in features:
-            value = features[feature]
-            
-            # Handle encoding based on feature type
-            if feature in feature_info:
-                feature_type = feature_info[feature]['type']
-                
-                if feature_type == 'categorical':
-                    # Use label encoder
-                    encoder = feature_encoders.get(feature)
-                    if encoder and value is not None:
-                        try:
-                            # Handle unknown categories
-                            if str(value) in encoder.classes_:
-                                X[feature] = encoder.transform([str(value)])[0]
-                            else:
-                                # Use most common class or 0
-                                X[feature] = 0
-                        except:
-                            X[feature] = 0
-                    else:
-                        X[feature] = 0
-                
-                elif feature_type == 'numerical':
-                    # Use median for missing values
-                    if value is not None:
-                        X[feature] = float(value)
-                    else:
-                        median_val = feature_info[feature].get('median', 0)
-                        X[feature] = median_val
-                
-                elif feature_type == 'binary':
-                    X[feature] = int(value) if value is not None else 0
-                
-                else:
-                    X[feature] = value if value is not None else 0
-            else:
-                # Default handling
-                X[feature] = value if value is not None else 0
-        else:
-            # Feature not provided, use default
-            X[feature] = 0
-    
-    return X
-
-# ===== SUBCATEGORY MAPPING =====
-# This should match your actual subcategory to ID mapping
-SUBCATEGORY_ID_MAPPING = {
-    'Long_Term_Care_Plans': 'LTC001',
-    'SHIELD': 'SHD001', 
-    'Term': 'TRM001',
-    'Investment_Linked_Plan___Accumulation': 'ILP001',
-    'Whole_Life': 'WHL001',
-    'Accident_and_Health_Plans': 'AHP001',
-    'Critical_Illness_Plans': 'CIP001',
-    'ENDOW_NP': 'END001',
-    'Retirement': 'RET001',
-    'Policy_Servicing_Non_Shield_Plans': 'PSV001',
-    'Add_Rider_to_existing_shield_plans': 'RDR001',
-    'Endowment': 'EDW001',
-    'Whole_Life_Income': 'WLI001',
-    'Universal_Life_Protection': 'ULP001',
-    'Discretionary_Managed_Account': 'DMA001'
-}
-
-def get_subcategory_id(subcategory_label: str) -> str:
-    """Convert subcategory label to ID"""
-    return SUBCATEGORY_ID_MAPPING.get(subcategory_label, f"UNK_{hash(subcategory_label) % 1000}")
-
-# ===== PREDICTION FUNCTION =====
-
-def predict_top_subcategories(client_features: pd.DataFrame, model_package: Dict, k: int = 3) -> List[tuple]:
-    """
-    Predict top-k subcategories with confidence scores
-    """
-    
-    model = model_package['model']
-    target_encoder = model_package['target_encoder']
-    top_features = model_package['top_features']
-    
-    # Ensure features are in correct order
-    X_pred = client_features[top_features]
-    
-    # Get prediction probabilities
-    pred_proba = model.predict_proba(X_pred)[0]
-    
-    # Get top-k predictions
-    top_k_indices = np.argsort(pred_proba)[-k:][::-1]
-    top_k_subcategories = target_encoder.inverse_transform(top_k_indices)
-    top_k_confidences = pred_proba[top_k_indices]
-    
-    return [(subcat, conf) for subcat, conf in zip(top_k_subcategories, top_k_confidences)]
-
-# ===== API STARTUP =====
-
-@app.on_event("startup")
-async def load_model():
-    """Load the ML model on startup"""
-    global model_package
-    
-    try:
-        model_package = joblib.load('SUBCATEGORY_PREDICTION_MODEL_V1.pkl')
-        logger.info("✅ Model loaded successfully")
-        logger.info(f"Model type: {model_package.get('model_name', 'Unknown')}")
-        logger.info(f"Features: {len(model_package['top_features'])}")
-        logger.info(f"Classes: {len(model_package['target_encoder'].classes_)}")
-    except Exception as e:
-        logger.error(f"❌ Failed to load model: {e}")
-        raise e
-
-# ===== API ENDPOINTS =====
-
-@app.get("/")
-async def root():
-    """API health check"""
-    return {
-        "message": "Product Subcategory Recommendation API",
-        "status": "healthy",
-        "model_loaded": model_package is not None,
-        "timestamp": datetime.now().isoformat()
-    }
-
-@app.get("/model/info")
-async def model_info():
-    """Get model information"""
-    if model_package is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    
-    return {
-        "model_name": model_package.get('model_name', 'Unknown'),
-        "training_date": model_package.get('training_date', 'Unknown'),
-        "performance": model_package.get('model_performance', {}),
-        "features": model_package['top_features'],
-        "target_classes": list(model_package['target_encoder'].classes_),
-        "total_classes": len(model_package['target_encoder'].classes_)
-    }
-
-@app.post("/predict", response_model=RecommendationResponse)
-async def predict_subcategories(client_data: ClientData):
-    """
-    Main prediction endpoint - returns top-3 subcategory recommendations
-    """
-    
-    start_time = datetime.now()
-    
-    if model_package is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    
-    try:
-        # Convert Pydantic model to dict
-        client_dict = client_data.dict()
-        
-        # Prepare model input
-        X_pred = prepare_model_input(client_dict, model_package)
-        
-        # Make predictions
-        predictions = predict_top_subcategories(X_pred, model_package, k=3)
-        
-        # Format response
-        rec_ids = []
-        rec_labels = []
-        detailed_recommendations = []
-        
-        for subcategory, confidence in predictions:
-            subcategory_id = get_subcategory_id(subcategory)
-            
-            rec_ids.append(subcategory_id)
-            rec_labels.append(subcategory)
-            
-            detailed_recommendations.append(ProductRecommendation(
-                Id=subcategory_id,
-                Label=subcategory,
-                Confidence=round(float(confidence), 4)
-            ))
-        
-        # Calculate processing time
-        processing_time = (datetime.now() - start_time).total_seconds()
-        
-        response = RecommendationResponse(
-            clientId=client_data.ClientId,
-            recProductSubCatId=rec_ids,
-            recProductSubCatLabel=rec_labels,
-            recommendations=detailed_recommendations,
-            processingTime=processing_time,
-            timestamp=datetime.now().isoformat()
-        )
-        
-        logger.info(f"✅ Prediction completed for client {client_data.ClientId} in {processing_time:.3f}s")
-        
-        return response
-        
-    except Exception as e:
-        logger.error(f"❌ Prediction failed for client {client_data.ClientId}: {str(e)}")
-        raise HTTPException(status_code=500, detail=f"Prediction failed: {str(e)}")
-
-@app.post("/predict/batch")
-async def predict_batch(clients: List[ClientData]):
-    """
-    Batch prediction endpoint for multiple clients
-    """
-    
-    if model_package is None:
-        raise HTTPException(status_code=503, detail="Model not loaded")
-    
-    results = []
-    
-    for client_data in clients:
-        try:
-            # Reuse single prediction logic
-            result = await predict_subcategories(client_data)
-            results.append(result)
-        except Exception as e:
-            logger.error(f"Failed prediction for client {client_data.ClientId}: {e}")
-            # Add error result
-            results.append({
-                "clientId": client_data.ClientId,
-                "error": str(e),
-                "timestamp": datetime.now().isoformat()
-            })
-    
-    return {
-        "total_clients": len(clients),
-        "successful_predictions": len([r for r in results if "error" not in r]),
-        "failed_predictions": len([r for r in results if "error" in r]),
-        "results": results
-    }
-
-# ===== EXAMPLE USAGE =====
-
-@app.get("/example")
-async def get_example_request():
-    """Get example client data for testing"""
-    return {
-        "example_client": {
-            "ClientId": "CLIENT_12345",
-            "ClientAge": 35,
-            "ClientGender": "Male",
-            "Nationality": "Singapore",
-            "MaritalStatus": "Married",
-            "IncomeRange": "S$50,000 - S$99,999",
-            "Education": "University",
-            "EmploymentStatus": "Employed",
-            "RiskProfile": "Moderate",
-            "SavingsAccounts": 50000,
-            "FixedDepositsAccount": 30000,
-            "StocksPortofolio": 25000,
-            "CPFOABalance": 40000,
-            "CPFSABalance": 20000,
-            "CPFMABalance": 15000,
-            "Total_Policies": 2,
-            "Total_Life_Coverage": 500000,
-            "Total_CI_Coverage": 200000,
-            "Total_Annual_Premium": 5000
-        }
-    }
-
-# ===== RUN SERVER =====
-
-if __name__ == "__main__":
-    uvicorn.run(
-        "app:app",
-        host="0.0.0.0",
-        port=8000,
-        reload=True,
-        log_level="info"
+try:
+    model = joblib.load(MODEL_PATH)
+    scaler = joblib.load(SCALER_PATH)
+    label_names: np.ndarray = joblib.load(LABELS_PATH)
+    selected_features: List[str] = joblib.load(SELECTED_FEATURES_PATH)  # order matters
+except Exception as e:
+    raise RuntimeError(
+        f"Failed to load artifacts: {e}. "
+        f"Ensure {MODEL_PATH}, {SCALER_PATH}, {LABELS_PATH}, and {SELECTED_FEATURES_PATH} exist."
     )
+
+app = FastAPI(title="Insurance Top‑K Recommender", version="1.0")
+
+# ---------- Pydantic schema (raw payload) ----------
+class RecommendationRequest(BaseModel):
+    # A) Demographics & status
+    ClientGender: Optional[str] = None
+    Nationality: Optional[str] = None
+    SpokenLanguage: Optional[str] = None     # e.g. "English,Mandarin"
+    WrittenLanguage: Optional[str] = None
+    Education: Optional[str] = None
+    EmploymentStatus: Optional[str] = None
+    Occupation: Optional[str] = None
+    MaritalStatus: Optional[str] = None
+    IncomeRange: Optional[str] = None
+    RiskProfile: Optional[str] = None
+    CKAProfile: Optional[str] = None
+    CARProfile: Optional[str] = None
+    ClientResidentialStatus: Optional[str] = None
+    CountryOfBirth: Optional[str] = None
+    Race: Optional[str] = None
+    ClientAge: Optional[float] = None
+    CurrencyCode: Optional[str] = "SGD"
+
+    # B) Temporal & session
+    ClientInvitedDate: Optional[datetime] = None
+    EMFCSubmitDate: Optional[datetime] = None
+    EMFC_Count: Optional[float] = 0
+
+    # C) Assets & balances
+    SavingsAccounts: Optional[float] = 0
+    FixedDepositsAccount: Optional[float] = 0
+    HomeAsset: Optional[float] = 0
+    MotorAsset: Optional[float] = 0
+    InsuranceCashValues: Optional[float] = 0
+    StocksPortofolio: Optional[float] = 0
+    BondPortofolio: Optional[float] = 0
+    UTFEquityAsset: Optional[float] = 0
+    ETFs: Optional[float] = 0
+    InvestmentProperties: Optional[float] = 0
+    CPFOABalance: Optional[float] = 0
+    CPFSABalance: Optional[float] = 0
+    CPFMABalance: Optional[float] = 0
+    SRSEquityAsset: Optional[float] = 0
+
+    # D) Coverage & premium totals
+    Total_Life_Coverage: Optional[float] = 0
+    Total_CI_Coverage: Optional[float] = 0
+    Total_Hospital_Income: Optional[float] = 0
+    Total_LTC_Coverage: Optional[float] = 0
+    Total_Annual_Premium: Optional[float] = 0
+
+    # E) Portfolio composition
+    Plan_Types: Optional[List[str]] = Field(default=None, description="e.g. ['Term','Integrated Shield']")
+    Insurance_Companies: Optional[List[str]] = None
+
+# ---------- Utilities: feature engineering (mirror Phase‑1) ----------
+def _normalize_lang(val: Optional[str]) -> str:
+    if val is None or str(val).strip() == "":
+        return "Unknown"
+    langs = sorted([s.strip().title() for s in str(val).split(",") if s.strip()])
+    return "|".join(langs) if langs else "Unknown"
+
+def _income_numeric(income_range: Optional[str]) -> float:
+    mapping = {
+        "No Income": 0,
+        "Below S$30,000": 15000,
+        "S$30,000 - S$49,999": 40000,
+        "S$50,000 - S$99,999": 75000,
+        "S$100,000 and above": 150000,
+    }
+    return float(mapping.get(income_range or "", 0))
+
+def _income_category(income_range: Optional[str]) -> str:
+    cat_map = {
+        "No Income": "Low",
+        "Below S$30,000": "Low",
+        "S$30,000 - S$49,999": "Medium",
+        "S$50,000 - S$99,999": "Medium",
+        "S$100,000 and above": "High",
+    }
+    return cat_map.get(income_range or "", "Unknown")
+
+def _age_group(age: Optional[float]) -> str:
+    if age is None: return "Unknown"
+    try:
+        a = float(age)
+    except:
+        return "Unknown"
+    bins = [(0,25,"Under_25"),(25,35,"25-35"),(35,45,"35-45"),(45,55,"45-55"),(55,65,"55-65"),(65,1e9,"Over_65")]
+    for lo, hi, label in bins:
+        if lo <= a < hi: return label
+    return "Unknown"
+
+def _life_stage(age_group: str, marital: Optional[str]) -> str:
+    if age_group == "Unknown" or marital is None: return "Unknown"
+    m = (marital or "").lower()
+    if age_group in ["Under_25","25-35"]:
+        return "Young_Single" if "single" in m else "Young_Family"
+    if age_group in ["35-45","45-55"]:
+        return "Mid_Career_Single" if "single" in m else "Mid_Career_Family"
+    return "Pre_Retirement"
+
+def _fin_sophistication(education: Optional[str], inv_ratio: float) -> str:
+    edu = (education or "").lower()
+    score = 0
+    if "university" in edu or "degree" in edu: score += 2
+    elif "diploma" in edu: score += 1
+    if inv_ratio > 0.3: score += 2
+    elif inv_ratio > 0.1: score += 1
+    return "High" if score >= 3 else ("Medium" if score >= 1 else "Low")
+
+def _temporal_features(now: datetime, invited: Optional[datetime], submit: Optional[datetime], emfc_count: float):
+    if invited is None:
+        tenure_days = 0.0
+    else:
+        tenure_days = max(0.0, (now - invited).total_seconds()/86400.0)
+    tenure_years = tenure_days / 365.25
+
+    if submit is None:
+        days_since = 0.0
+    else:
+        days_since = max(0.0, (now - submit).total_seconds()/86400.0)
+    months_since = days_since / 30.44
+
+    fna_freq = float(emfc_count or 0) / (tenure_years + 1.0)
+    return tenure_days, tenure_years, days_since, months_since, fna_freq
+
+def _portfolio_affinities(plan_types: Optional[List[str]]) -> Dict[str, int]:
+    pt = [p.strip() for p in (plan_types or [])]
+    has = lambda name: int(any(name == x or name in str(x) for x in pt))
+    feats = {
+        "Affinity_Term_to_Whole_Life": has("Term"),
+        "Affinity_Term_to_Investment-Linked": has("Term"),
+        "Affinity_Term_to_Universal_Life": has("Term"),
+        "Affinity_Whole_Life_to_Investment-Linked": has("Whole Life"),
+        "Affinity_Whole_Life_to_Endowment": has("Whole Life"),
+        "Affinity_Whole_Life_to_Annuity": has("Whole Life"),
+        "Affinity_Endowment_to_Investment-Linked": has("Endowment"),
+        "Affinity_Endowment_to_Annuity": has("Endowment"),
+        "Affinity_Critical_Illness_to_Early_Critical_Illness": has("Critical Illness"),
+        "Affinity_Critical_Illness_to_Long_Term_Care": has("Critical Illness"),
+    }
+    # Diversity & evolution stage
+    diversity = len(set(pt))
+    # Evolution: 0 none; 1 basic; 2 developing; 3 intermediate; 4 advanced
+    plan_str = " ".join(pt)
+    if not pt:
+        stage = 0
+    elif ("Investment-Linked" in plan_str) or ("Annuity" in plan_str):
+        stage = 4
+    elif ("Whole Life" in plan_str) or ("Endowment" in plan_str):
+        stage = 3
+    elif ("Critical Illness" in plan_str) or ("Disability" in plan_str):
+        stage = 2
+    else:
+        stage = 1
+
+    feats["Product_Diversity_Score"] = diversity
+    feats["Insurance_Evolution_Stage"] = stage
+    return feats
+
+def _coverage_flags_and_ratios(total_life: float, total_ci: float, total_hosp: float, total_ltc: float,
+                               total_prem: float, income_numeric: float, total_policies_known: Optional[float]=None):
+    has_insurance = int((total_policies_known or 0) > 0 or any([total_life, total_ci, total_hosp, total_ltc]))
+    has_life = int((total_life or 0) > 0)
+    has_ci = int((total_ci or 0) > 0)
+    has_hosp = int((total_hosp or 0) > 0)
+    has_ltc = int((total_ltc or 0) > 0)
+
+    life_multiple = (total_life / income_numeric) if income_numeric and income_numeric > 0 else 0.0
+    prem_to_income = (total_prem / income_numeric) if income_numeric and income_numeric > 0 else 0.0
+
+    life_gap = int(has_insurance == 1 and has_life == 0)
+    ci_gap = int(has_insurance == 1 and has_ci == 0)
+
+    # sophistication by coverage count
+    cov_count = has_life + has_ci + has_hosp + has_ltc
+    if has_insurance == 0:
+        sophistication = "No_Insurance"
+    elif cov_count >= 3:
+        sophistication = "Comprehensive"
+    elif cov_count >= 2:
+        sophistication = "Moderate"
+    else:
+        sophistication = "Basic"
+
+    return dict(
+        Has_Insurance=has_insurance,
+        Has_Life_Coverage=has_life,
+        Has_CI_Coverage=has_ci,
+        Has_Hospital_Coverage=has_hosp,
+        Has_LTC_Coverage=has_ltc,
+        Life_Coverage_Multiple=life_multiple,
+        Premium_to_Income_Ratio=prem_to_income,
+        Life_Coverage_Gap=life_gap,
+        CI_Coverage_Gap=ci_gap,
+        Insurance_Sophistication=sophistication,
+    )
+
+# ---------- Core: build model-ready row ----------
+def build_feature_row(req: RecommendationRequest) -> pd.DataFrame:
+    now = datetime.now(timezone.utc)
+
+    # Normalize languages
+    spoken_norm = _normalize_lang(req.SpokenLanguage)
+    written_norm = _normalize_lang(req.WrittenLanguage)
+
+    # Income transforms
+    income_num = _income_numeric(req.IncomeRange)
+    income_cat = _income_category(req.IncomeRange)
+
+    # Asset totals
+    total_liquid = float(req.SavingsAccounts or 0) + float(req.FixedDepositsAccount or 0)
+    total_inv = float(req.StocksPortofolio or 0) + float(req.BondPortofolio or 0) + float(req.UTFEquityAsset or 0) + float(req.ETFs or 0)
+    total_cpf = float(req.CPFOABalance or 0) + float(req.CPFSABalance or 0) + float(req.CPFMABalance or 0)
+    est_net_worth = total_liquid + total_inv + total_cpf + float(req.InvestmentProperties or 0)
+    denom = total_liquid + total_inv
+    inv_ratio = (total_inv / denom) if denom > 0 else 0.0
+
+    # Temporal features
+    tenure_days, tenure_years, days_since, months_since, fna_freq = _temporal_features(
+        now, req.ClientInvitedDate, req.EMFCSubmitDate, req.EMFC_Count or 0
+    )
+
+    # Affinities, diversity, evolution
+    aff = _portfolio_affinities(req.Plan_Types or [])
+
+    # Coverage flags/ratios
+    cov = _coverage_flags_and_ratios(
+        float(req.Total_Life_Coverage or 0),
+        float(req.Total_CI_Coverage or 0),
+        float(req.Total_Hospital_Income or 0),
+        float(req.Total_LTC_Coverage or 0),
+        float(req.Total_Annual_Premium or 0),
+        income_num,
+        None,  # Total_Policies not provided in payload; flags infer from totals
+    )
+
+    # Age group & life stage & financial sophistication
+    age_grp = _age_group(req.ClientAge)
+    life_stage = _life_stage(age_grp, req.MaritalStatus)
+    fin_soph = _fin_sophistication(req.Education, inv_ratio)
+
+    # Build a single-row DataFrame containing ALL expected features.
+    # Any missing columns will be added later (with default).
+    row: Dict[str, Any] = {
+        # direct passthroughs
+        "ClientGender": req.ClientGender,
+        "Nationality": req.Nationality,
+        "SpokenLanguage": spoken_norm,
+        "WrittenLanguage": written_norm,
+        "Education": req.Education,
+        "EmploymentStatus": req.EmploymentStatus,
+        "Occupation": req.Occupation,
+        "MaritalStatus": req.MaritalStatus,
+        "IncomeRange": req.IncomeRange,
+        "RiskProfile": req.RiskProfile,
+        "CKAProfile": req.CKAProfile,
+        "CARProfile": req.CARProfile,
+        "ClientResidentialStatus": req.ClientResidentialStatus,
+        "CountryOfBirth": req.CountryOfBirth,
+        "Race": req.Race,
+        "ClientAge": req.ClientAge,
+        "CurrencyCode": req.CurrencyCode,
+        # temporal
+        "Client_Tenure_Days": tenure_days,
+        "Client_Tenure_Years": tenure_years,
+        "Days_Since_Last_FNA": days_since,
+        "Months_Since_Last_FNA": months_since,
+        "FNA_Frequency": fna_freq,
+        "EMFC_Count": req.EMFC_Count or 0,
+        # assets
+        "SavingsAccounts": req.SavingsAccounts or 0,
+        "FixedDepositsAccount": req.FixedDepositsAccount or 0,
+        "HomeAsset": req.HomeAsset or 0,
+        "MotorAsset": req.MotorAsset or 0,
+        "InsuranceCashValues": req.InsuranceCashValues or 0,
+        "StocksPortofolio": req.StocksPortofolio or 0,
+        "BondPortofolio": req.BondPortofolio or 0,
+        "UTFEquityAsset": req.UTFEquityAsset or 0,
+        "ETFs": req.ETFs or 0,
+        "InvestmentProperties": req.InvestmentProperties or 0,
+        "CPFOABalance": req.CPFOABalance or 0,
+        "CPFSABalance": req.CPFSABalance or 0,
+        "CPFMABalance": req.CPFMABalance or 0,
+        "SRSEquityAsset": req.SRSEquityAsset or 0,
+        # portfolio companies (kept as categorical)
+        "Insurance_Companies": "|".join(req.Insurance_Companies) if req.Insurance_Companies else "Unknown",
+        # income & buckets
+        "Income_Numeric": income_num,
+        "Income_Category": income_cat,
+        "Total_Liquid_Assets": total_liquid,
+        "Total_Investments": total_inv,
+        "Total_CPF": total_cpf,
+        "Estimated_Net_Worth": est_net_worth,
+        "Investment_Ratio": inv_ratio,
+        "Age_Group": age_grp,
+        "Life_Stage": life_stage,
+        "Financial_Sophistication": fin_soph,
+        # coverage-derived
+        **cov,
+        # affinity & composition
+        **aff,
+    }
+
+    df = pd.DataFrame([row])
+
+    # Ensure ALL selected_features columns exist, fill missing with sensible defaults
+    for col in selected_features:
+        if col not in df.columns:
+            # default numeric 0, else "Unknown"
+            df[col] = 0 if col not in (
+                "ClientGender","Nationality","SpokenLanguage","WrittenLanguage","Education",
+                "EmploymentStatus","Occupation","MaritalStatus","IncomeRange","RiskProfile",
+                "CKAProfile","CARProfile","ClientResidentialStatus","CountryOfBirth","Race",
+                "Insurance_Companies","Income_Category","Age_Group","Life_Stage",
+                "Financial_Sophistication","CurrencyCode"
+            ) else "Unknown"
+
+    # Reorder to match training
+    df = df[selected_features]
+
+    # Factorize categoricals exactly like training (simple factorize; same process at serve-time)
+    # NOTE: For fully stable behavior, persist encoders per column. This mirrors your current training flow.
+    obj_cols = df.select_dtypes(include="object").columns.tolist()
+    for c in obj_cols:
+        df[c] = df[c].fillna("Unknown")
+        df[c] = pd.factorize(df[c])[0]
+
+    return df
+
+# ---------- Predict helpers ----------
+def _predict_proba_multioutput(multi_model, X_np: np.ndarray) -> np.ndarray:
+    """Return (n_samples, n_labels) probability matrix."""
+    y_pred_proba = multi_model.predict_proba(X_np)
+    if isinstance(y_pred_proba, list):
+        # list of length n_labels, each (n_samples, 2)
+        probs = np.column_stack([p[:, 1] for p in y_pred_proba])
+    else:
+        # Some wrappers may return array directly
+        probs = y_pred_proba
+    return probs
+
+def _topk_from_probs(probs_row: np.ndarray, k: int) -> List[Dict[str, Any]]:
+    idx = np.argsort(probs_row)[-k:][::-1]
+    return [
+        {"rank": i+1, "label": str(label_names[j]), "probability": float(probs_row[j])}
+        for i, j in enumerate(idx)
+    ]
+
+# ---------- Routes ----------
+@app.get("/health")
+def health():
+    return {"status": "ok", "n_features_expected": len(selected_features), "n_labels": len(label_names)}
+
+@app.get("/meta/features")
+def meta_features():
+    return {"selected_features": selected_features, "labels": list(map(str, label_names))}
+
+@app.post("/recommend/topk")
+def recommend_topk(req: RecommendationRequest, k: int = Query(3, ge=1, le=10)):
+    try:
+        df = build_feature_row(req)
+        X_scaled = scaler.transform(df.values)
+        probs = _predict_proba_multioutput(model, X_scaled)
+        topk = _topk_from_probs(probs[0], k)
+        return {
+            "top_k": topk,
+            "debug": {
+                "feature_vector_shape": list(df.shape),
+                "feature_order": selected_features,
+            }
+        }
+    except Exception as e:
+        raise HTTPException(status_code=400, detail=f"Inference failed: {e}")

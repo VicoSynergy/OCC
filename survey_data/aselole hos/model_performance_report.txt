@@ -1,0 +1,25 @@
+FINAL MODEL PERFORMANCE REPORT
+================================================================================
+
+Model: LightGBM with GBDT boosting
+Training samples: 2998
+Test samples: 750
+Number of products: 48
+Optimal threshold: 0.55
+
+TOP-K ACCURACY:
+  Top-1: 0.8681
+  Top-3: 0.9569
+  Top-5: 0.9677
+
+CLASSIFICATION METRICS:
+  F1 Weighted: 0.4662
+  Precision: 0.4036
+  Recall: 0.5865
+  Hamming Loss: 0.2504
+
+RATING PRIORITIZATION:
+  Avg Score Rating=2: 0.6774
+  Avg Score Rating=1: 0.5570
+  Avg Score Rating=0: 0.3620
+  Ratio (2/1): 1.216
