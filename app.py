@@ -3,11 +3,13 @@ from __future__ import annotations
 from typing import List, Optional, Dict, Any
 from datetime import datetime, timezone
 import math
-
+# top of file
+from typing import List, Optional, Literal, Dict, Any
+from pydantic import BaseModel, Field, ConfigDict
+from fastapi import FastAPI, HTTPException, Query, Body
 import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
-from pydantic import BaseModel, Field, conlist
 import joblib
 
 # ---------- Load artifacts ----------
@@ -29,58 +31,190 @@ except Exception as e:
 
 app = FastAPI(title="Insurance Top‑K Recommender", version="1.0")
 
+PROTECTION_EXAMPLE: Dict[str, Any] = {
+    "ClientGender": "Male",
+    "Nationality": "Singaporean",
+    "SpokenLanguage": "English,Mandarin",
+    "WrittenLanguage": "English",
+    "Education": "Tertiary",
+    "EmploymentStatus": "Full-time",
+    "Occupation": "Manager",
+    "MaritalStatus": "Married",
+    "IncomeRange": "S$50,000 - S$99,999",
+    "RiskProfile": "Balanced",
+    "CKAProfile": "Not Assessed",
+    "CARProfile": "Not Assessed",
+    "ClientResidentialStatus": "Singapore Citizen",
+    "CountryOfBirth": "Singapore",
+    "Race": "Chinese",
+    "ClientAge": 42,
+    "CurrencyCode": "SGD",
+    "ClientInvitedDate": "2022-06-01T00:00:00Z",
+    "EMFCSubmitDate": "2025-03-15T00:00:00Z",
+    "EMFC_Count": 3,
+    "SavingsAccounts": 20000,
+    "FixedDepositsAccount": 10000,
+    "StocksPortofolio": 15000,
+    "BondPortofolio": 2000,
+    "UTFEquityAsset": 3000,
+    "ETFs": 1000,
+    "InvestmentProperties": 0,
+    "CPFOABalance": 25000,
+    "CPFSABalance": 10000,
+    "CPFMABalance": 8000,
+    "Total_Life_Coverage": 250000,
+    "Total_CI_Coverage": 100000,
+    "Total_Annual_Premium": 2400,
+    "Plan_Types": ["Term","Integrated Shield"],
+    "Insurance_Companies": ["AIA","Singlife"]
+}
+
+WEALTH_EXAMPLE: Dict[str, Any] = {
+    "ClientGender":"Female","Nationality":"Singaporean","SpokenLanguage":"English",
+    "WrittenLanguage":"English","Education":"Post Graduate","EmploymentStatus":"Full-time",
+    "MaritalStatus":"Married","IncomeRange":"S$100,000 and above","RiskProfile":"Moderately Aggressive",
+    "CKAProfile":"Pass","CARProfile":"Pass","ClientAge":37,"CurrencyCode":"SGD",
+    "ClientInvitedDate":"2021-02-01T00:00:00Z","EMFCSubmitDate":"2025-01-10T00:00:00Z","EMFC_Count":5,
+    "SavingsAccounts":40000,"FixedDepositsAccount":60000,"StocksPortofolio":120000,"BondPortofolio":25000,
+    "UTFEquityAsset":45000,"ETFs":30000,"InvestmentProperties":0,
+    "CPFOABalance":45000,"CPFSABalance":80000,"CPFMABalance":15000,
+    "Total_Life_Coverage":400000,"Total_CI_Coverage":150000,"Total_Annual_Premium":6000,
+    "Plan_Types":["Whole Life","Endowment","Integrated Shield"],"Insurance_Companies":["AIA","Prudential"]
+}
+
+
+# ---------- Pydantic schema (raw payload) ----------
 # ---------- Pydantic schema (raw payload) ----------
 class RecommendationRequest(BaseModel):
     # A) Demographics & status
-    ClientGender: Optional[str] = None
-    Nationality: Optional[str] = None
-    SpokenLanguage: Optional[str] = None     # e.g. "English,Mandarin"
-    WrittenLanguage: Optional[str] = None
-    Education: Optional[str] = None
-    EmploymentStatus: Optional[str] = None
-    Occupation: Optional[str] = None
-    MaritalStatus: Optional[str] = None
-    IncomeRange: Optional[str] = None
-    RiskProfile: Optional[str] = None
-    CKAProfile: Optional[str] = None
-    CARProfile: Optional[str] = None
-    ClientResidentialStatus: Optional[str] = None
-    CountryOfBirth: Optional[str] = None
-    Race: Optional[str] = None
-    ClientAge: Optional[float] = None
-    CurrencyCode: Optional[str] = "SGD"
+    ClientGender: Optional[Literal["Male","Female","Other"]] = Field(
+        None,
+        description='Gender. One of: "Male", "Female", "Other".'
+    )
+    Nationality: Optional[str] = Field(
+        None,
+        description='Client nationality. Expected common country name, e.g. "Singaporean", "Indonesian".'
+    )
+    SpokenLanguage: Optional[str] = Field(
+        None,
+        description='Comma-separated languages. Title-cased names. E.g. "English,Mandarin" or "English".'
+    )
+    WrittenLanguage: Optional[str] = Field(
+        None,
+        description='Comma-separated languages client can write. E.g. "English" or "English,Bahasa".'
+    )
+    Education: Optional[str] = Field(
+        None,
+        description='Highest education. E.g. "Secondary", "Diploma", "Tertiary", "Post Graduate".'
+    )
+    EmploymentStatus: Optional[str] = Field(
+        None,
+        description='Employment status. E.g. "Full-time", "Part-time", "Self-employed", "Unemployed", "Retired", "Student".'
+    )
+    Occupation: Optional[str] = Field(
+        None,
+        description='Free-text occupation. E.g. "Manager", "Engineer", "Teacher", "Retired", etc.'
+    )
+    MaritalStatus: Optional[str] = Field(
+        None,
+        description='Marital status. E.g. "Single", "Married", "Divorced", "Widowed".'
+    )
+    IncomeRange: Optional[Literal[
+        "No Income",
+        "Below S$30,000",
+        "S$30,000 - S$49,999",
+        "S$50,000 - S$99,999",
+        "S$100,000 and above"
+    ]] = Field(
+        None,
+        description='Household/annual income band. One of the listed literals'
+    )
+    RiskProfile: Optional[str] = Field(
+        None,
+        description='Investment risk profile. E.g. "Conservative", "Moderately Conservative", "Balanced", "Moderately Aggressive", "Aggressive", or "Not Assessed".'
+    )
+    CKAProfile: Optional[Literal["Pass","Not Pass","Not Assessed"]] = Field(
+        None,
+        description='Customer Knowledge Assessment (CKA) result. One of: "Pass", "Not Pass", "Not Assessed".'
+    )
+    CARProfile: Optional[Literal["Pass","Not Pass","Not Assessed"]] = Field(
+        None,
+        description='Customer Account Review (CAR) result. One of: "Pass", "Not Pass", "Not Assessed".'
+    )
+    ClientResidentialStatus: Optional[str] = Field(
+        None,
+        description='Residency. E.g. "Singapore Citizen", "Permanent Resident", "Work Pass", "Foreigner".'
+    )
+    CountryOfBirth: Optional[str] = Field(
+        None,
+        description='Country of birth. Common country name, e.g. "Singapore", "Indonesia".'
+    )
+    Race: Optional[str] = Field(
+        None,
+        description='Self-declared race/ethnicity. E.g. "Chinese", "Malay", "Indian", "Others".'
+    )
+    ClientAge: Optional[float] = Field(
+        None,
+        ge=0,
+        description='Client age, fill with integer'        
+    )
+    CurrencyCode: Optional[str] = Field(
+        "SGD",
+        description='ISO 4217 currency code. E.g. "SGD", "USD".'
+    )
 
     # B) Temporal & session
-    ClientInvitedDate: Optional[datetime] = None
-    EMFCSubmitDate: Optional[datetime] = None
-    EMFC_Count: Optional[float] = 0
+    ClientInvitedDate: Optional[datetime] = Field(
+        None,
+        description='ISO 8601 datetime. E.g. "2022-06-01T00:00:00Z".'
+    )
+    EMFCSubmitDate: Optional[datetime] = Field(
+        None,
+        description='ISO 8601 datetime of latest FNA/EMFC submission. E.g. "2025-03-15T00:00:00Z".'
+    )
+    EMFC_Count: Optional[float] = Field(
+        0, 
+        ge=0,
+        description='Number of FNA sessions client did with One Synergy'        
+    )
 
-    # C) Assets & balances
-    SavingsAccounts: Optional[float] = 0
-    FixedDepositsAccount: Optional[float] = 0
-    HomeAsset: Optional[float] = 0
-    MotorAsset: Optional[float] = 0
-    InsuranceCashValues: Optional[float] = 0
-    StocksPortofolio: Optional[float] = 0
-    BondPortofolio: Optional[float] = 0
-    UTFEquityAsset: Optional[float] = 0
-    ETFs: Optional[float] = 0
-    InvestmentProperties: Optional[float] = 0
-    CPFOABalance: Optional[float] = 0
-    CPFSABalance: Optional[float] = 0
-    CPFMABalance: Optional[float] = 0
-    SRSEquityAsset: Optional[float] = 0
+    # C) Assets & balances 
+    SavingsAccounts: Optional[float] = Field(0, ge=0)
+    FixedDepositsAccount: Optional[float] = Field(0, ge=0)
+    HomeAsset: Optional[float] = Field(0, ge=0)
+    MotorAsset: Optional[float] = Field(0, ge=0)
+    InsuranceCashValues: Optional[float] = Field(0, ge=0)
+    StocksPortofolio: Optional[float] = Field(0, ge=0)
+    BondPortofolio: Optional[float] = Field(0, ge=0)
+    UTFEquityAsset: Optional[float] = Field(0, ge=0)
+    ETFs: Optional[float] = Field(0, ge=0)
+    InvestmentProperties: Optional[float] = Field(0, ge=0)
+    CPFOABalance: Optional[float] = Field(0, ge=0)
+    CPFSABalance: Optional[float] = Field(0, ge=0)
+    CPFMABalance: Optional[float] = Field(0, ge=0)
+    SRSEquityAsset: Optional[float] = Field(0, ge=0)
 
-    # D) Coverage & premium totals
-    Total_Life_Coverage: Optional[float] = 0
-    Total_CI_Coverage: Optional[float] = 0
-    Total_Hospital_Income: Optional[float] = 0
-    Total_LTC_Coverage: Optional[float] = 0
-    Total_Annual_Premium: Optional[float] = 0
+    # D) Coverage & premium totals (numeric)
+    Total_Life_Coverage: Optional[float] = Field(0, ge=0)
+    Total_CI_Coverage: Optional[float] = Field(0, ge=0)
+    Total_Hospital_Income: Optional[float] = Field(0, ge=0)
+    Total_LTC_Coverage: Optional[float] = Field(0, ge=0)
+    Total_Annual_Premium: Optional[float] = Field(0, ge=0)
 
     # E) Portfolio composition
-    Plan_Types: Optional[List[str]] = Field(default=None, description="e.g. ['Term','Integrated Shield']")
-    Insurance_Companies: Optional[List[str]] = None
+    Plan_Types: Optional[List[str]] = Field(
+        default=None,
+        description='List of existing plan types (case-sensitive matching not required). E.g. ["Term","Whole Life","Endowment","Integrated Shield","Investment-Linked","Annuity","Critical Illness","Early Stage Critical Illness","Disability","Long Term Care"].'
+    )
+    Insurance_Companies: Optional[List[str]] = Field(
+        default=None,
+        description='List of insurer names. E.g. ["AIA","Prudential","Singlife","Income","Allianz","FWD","Etiqa","Great Eastern","AIG"].'
+    )
+
+    model_config = ConfigDict(json_schema_extra={
+        "examples": [PROTECTION_EXAMPLE, WEALTH_EXAMPLE]
+    })
+
 
 # ---------- Utilities: feature engineering (mirror Phase‑1) ----------
 def _normalize_lang(val: Optional[str]) -> str:
@@ -386,8 +520,42 @@ def health():
 def meta_features():
     return {"selected_features": selected_features, "labels": list(map(str, label_names))}
 
-@app.post("/recommend/topk")
-def recommend_topk(req: RecommendationRequest, k: int = Query(3, ge=1, le=10)):
+def build_body_descriptions() -> str:
+    lines = []
+    for name, field in RecommendationRequest.model_fields.items():
+        desc = field.description or ""
+        lines.append(f"- **{name}**: {desc}")
+    return "\n".join(lines)
+
+@app.post(
+    "/recommend/topk",
+    summary="Get top‑K product recommendations",
+    description=(
+        "Consumes raw client profile/temporal/assets/coverage/portfolio, "
+        "recomputes engineered features, and returns top-K product labels with probabilities.\n\n"
+        "### Request Body Fields\n"
+        f"{build_body_descriptions()}"
+    ),
+    tags=["Recommendations"]
+)
+def recommend_topk(
+    req: RecommendationRequest = Body(
+        ...,
+        examples={
+            "protection_user": {
+                "summary": "Protection‑heavy client",
+                "description": "Client with basic protection and Shield; often gets CI or Term.",
+                "value": PROTECTION_EXAMPLE
+            },
+            "wealth_user": {
+                "summary": "Wealth/ILP‑oriented client",
+                "description": "Higher income, investment holdings; tends to get ILP/Endowment/Retirement.",
+                "value": WEALTH_EXAMPLE
+            }
+        }
+    ),
+    k: int = Query(3, ge=1, le=10, description="Number of recommendations to return.")
+):
     try:
         df = build_feature_row(req)
         X_scaled = scaler.transform(df.values)
