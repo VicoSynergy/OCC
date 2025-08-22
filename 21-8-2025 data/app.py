@@ -513,8 +513,7 @@ def build_body_descriptions() -> str:
     description=(
         """
 Consumes raw client profile/temporal/assets/coverage/portfolio, recomputes engineered features, and returns top‑K product labels with probabilities.
-
-# Request Body Fields (Grouped)
+# Request Body Fields 
 
 ## Identity & Demographics
 - **ClientGender** *(string)*: One of "Male", "Female", "Other".
