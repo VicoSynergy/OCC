@@ -1,9 +1,6 @@
-# main.py
 from __future__ import annotations
 from typing import List, Optional, Dict, Any, Tuple
 from datetime import datetime, timezone
-import math
-# top of file
 from typing import List, Optional, Literal, Dict, Any
 from pydantic import BaseModel, Field, ConfigDict
 from fastapi import FastAPI, HTTPException, Query, Body
@@ -11,12 +8,13 @@ import numpy as np
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Query
 import joblib
+from fastapi.middleware.cors import CORSMiddleware
 
 # ---------- Load artifacts ----------
 MODEL_PATH = "insurance_top_k_recommendation_model.pkl"
 SCALER_PATH = "feature_scaler.pkl"
 LABELS_PATH = "label_names.pkl"
-SELECTED_FEATURES_PATH = "selected_features.pkl"  # <-- You should have saved this
+SELECTED_FEATURES_PATH = "selected_features.pkl"  
 
 try:
     model = joblib.load(MODEL_PATH)
@@ -30,6 +28,14 @@ except Exception as e:
     )
 
 app = FastAPI(title="Insurance Top‑K Recommender", version="1.0")
+
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:3000"],
+    allow_credentials=True,
+    allow_methods=["*"],   
+    allow_headers=["*"],
+)
 
 PROTECTION_EXAMPLE: Dict[str, Any] = {
     "ClientGender": "Male",
@@ -464,7 +470,7 @@ def build_feature_row(req: RecommendationRequest) -> pd.DataFrame:
     df = df[selected_features]
 
     # Factorize categoricals exactly like training (simple factorize; same process at serve-time)
-    # NOTE: For fully stable behavior, persist encoders per column. This mirrors your current training flow.
+    # NOTE: For fully stable behavior, persist encoders per column. 
     obj_cols = df.select_dtypes(include="object").columns.tolist()
     for c in obj_cols:
         df[c] = df[c].fillna("Unknown")
